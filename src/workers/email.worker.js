@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { Worker } from "bullmq";
-
+import { deadLetterQueue } from "../queues/dead-letter.queue.js";
 import { connection } from "../config/redis.js";
 import { sendEmail } from "../services/email.service.js";
 
@@ -38,9 +38,37 @@ worker.on("completed", (job, result) => {
   console.log("Result:", result);
 });
 
-worker.on("failed", (job, error) => {
-  console.error("Failed job:", job?.id);
+worker.on("failed", async (job, error) => {
+  if (!job) return;
+
+  console.error("Failed job:", job.id);
   console.error("Reason:", error.message);
+
+  const maxAttempts = job.opts.attempts ?? 1;
+
+  if (job.attemptsMade >= maxAttempts) {
+    try {
+      await deadLetterQueue.add(
+        "permanently-failed-email",
+        {
+          originalJobId: job.id,
+          originalQueue: "email-queue",
+          originalJobName: job.name,
+          originalData: job.data,
+          failureReason: error.message,
+          attemptsMade: job.attemptsMade,
+          failedAt: new Date().toISOString(),
+        },
+        {
+          jobId: `failed-${job.id}`,
+        },
+      );
+
+      console.log("Moved to dead-letter queue:", job.id);
+    } catch (dlqError) {
+      console.error("Could not add job to DLQ:", dlqError);
+    }
+  }
 });
 
 worker.on("error", (error) => {
